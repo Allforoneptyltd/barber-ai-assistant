@@ -1,0 +1,84 @@
+from flask import Flask, request, jsonify, render_template
+import openai
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from twilio.twiml.messaging_response import MessagingResponse
+import os
+
+# === CONFIGURATION ===
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# Google Sheets setup
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
+client = gspread.authorize(creds)
+sheet = client.open("AppointmentsDB").sheet1
+
+app = Flask(__name__)
+
+# Helper function to get number of visits
+def get_user_visits(phone):
+    records = sheet.get_all_records()
+    visits = sum(1 for row in records if row['Phone'] == phone)
+    return visits
+    # Loyalty message generator
+def loyalty_response(name, visits):
+    if visits >= 3:
+        return f"Yo {name}, you’ve hit 3 visits—your next cut is FREE! Book here: [your link] and use code 'LOYALTY'."
+    elif visits == 2:
+        return f"Hey {name}, just 1 more cut till your free one. Book here: [your link]!"
+    else:
+        return f"Thanks for hitting us up, {name}! You’ve had {visits} visits. Ready for your next cut?"
+# Web interface
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+# API endpoint to handle chatbot messages
+@app.route("/barber-bot", methods=["POST"])
+def handle_message():
+    data = request.json
+    name = data.get("name")
+    phone = data.get("phone")
+    message = data.get("message", "")
+
+    visits = get_user_visits(phone)
+    prompt = f"{message}\n\nAlso, this user has {visits} visits. Suggest booking with loyalty logic."
+
+    ai_response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful barber assistant. Be friendly, and use loyalty logic."},
+            {"role": "user", "content": prompt}
+            ],
+        temperature=0.7
+    )
+
+    reply = ai_response.choices[0].message['content']
+    return jsonify({"reply": reply})
+
+# WhatsApp endpoint via Twilio
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_reply():
+    name = "Client"  # Optional
+    phone = request.form.get("From", "").replace("whatsapp:", "")
+    message = request.form.get("Body", "")
+
+    visits = get_user_visits(phone)
+    prompt = f"{message}\n\nAlso, this user has {visits} visits. Suggest booking with loyalty logic."
+
+    ai_response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful barber assistant. Be friendly, and use loyalty logic."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.7
+    )
+    reply = ai_response.choices[0].message['content']
+    twilio_response = MessagingResponse()
+    twilio_response.message(reply)
+    return str(twilio_response)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=3000)
